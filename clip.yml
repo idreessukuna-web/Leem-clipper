@@ -1,0 +1,75 @@
+name: clip
+
+on:
+  workflow_dispatch:
+    inputs:
+      video_url:
+        description: Public URL of the uploaded video
+        required: true
+      job_id:
+        description: Job id from the website
+        required: true
+      keywords:
+        description: Extra comma-separated keywords
+        required: false
+        default: ""
+      model:
+        description: Whisper model (tiny, base, small, medium)
+        required: false
+        default: base
+
+jobs:
+  clip:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      JOB_ID: ${{ inputs.job_id }}
+      VIDEO_URL: ${{ inputs.video_url }}
+      BLOB_READ_WRITE_TOKEN: ${{ secrets.BLOB_READ_WRITE_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: worker/requirements.txt
+
+      - name: Install worker dependencies
+        run: |
+          cd worker && npm install
+          cd ..
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg fonts-dejavu-core
+          pip install -r worker/requirements.txt
+
+      - name: Cache Whisper model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: whisper-${{ inputs.model }}
+
+      - name: Download video
+        run: curl -L --fail --retry 3 -o input.mp4 "$VIDEO_URL"
+
+      - name: Make clips
+        env:
+          INPUT_PATH: input.mp4
+          OUT_DIR: clips
+          WHISPER_MODEL: ${{ inputs.model }}
+          KEYWORDS: ${{ inputs.keywords }}
+        run: python worker/clipper.py
+
+      - name: Upload clips
+        run: cd worker && node upload.mjs ../clips "$JOB_ID" --delete-input
+
+      - name: Report failure
+        if: failure()
+        run: |
+          mkdir -p clips-error
+          echo '{"error":"Processing failed. Open the Actions tab on your GitHub repo and check the log for this run."}' > clips-error/error.json
+          cd worker && node upload.mjs ../clips-error "$JOB_ID"
